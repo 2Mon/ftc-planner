@@ -1,5 +1,6 @@
 <script>
   import { onMount } from 'svelte';
+  import { base } from '$app/paths';
   import jsQR from 'jsqr';
 
   // ── State ────────────────────────────────────────────────────────────────────
@@ -355,8 +356,7 @@
 
   onMount(() => {
     FIELD = new Image();
-    FIELD.crossOrigin = 'anonymous';
-    FIELD.src = 'https://cdn.hackclub.com/019cf92a-976e-7cc8-80c4-26c88ad87bc1/decode-custom-field-images-meepmeep-compatible-printer-v0-xsjhmvxpoonf1.png';
+    FIELD.src = `${base}/field.png`;
     FIELD.onload = () => redraw();
 
     const ro = new ResizeObserver(() => {
