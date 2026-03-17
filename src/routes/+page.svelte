@@ -59,7 +59,7 @@
   }
 
   // ── Path simplification (Ramer–Douglas–Peucker) ───────────────────────────────
-  function simplify(path, eps = 0.006) {
+  function simplify(path, eps = 0.02) {
     if (path.length <= 2) return path;
     function rdp(pts) {
       if (pts.length <= 2) return pts;
@@ -79,8 +79,8 @@
   }
 
   // ── Serialise / deserialise ───────────────────────────────────────────────────
-  const tf  = p => ({ x: +((p.x - 0.5) * 144).toFixed(1), y: +((0.5 - p.y) * 144).toFixed(1) });
-  const ftf = p => ({ x: +(p.x / 144 + 0.5).toFixed(4), y: +(0.5 - p.y / 144).toFixed(4) });
+  const tf  = p => ({ x: +((p.x - 0.5) * 144).toFixed(0), y: +((0.5 - p.y) * 144).toFixed(0) });
+  const ftf = p => ({ x: +(p.x / 144 + 0.5).toFixed(3), y: +(0.5 - p.y / 144).toFixed(3) });
 
   function encodeAlliance(alliance) {
     const ts = teams.filter(t => t.alliance === alliance);
@@ -96,25 +96,50 @@
   }
 
   function buildQRPayload(alliance) {
-    return { match: matchNumber, alliance, teams: encodeAlliance(alliance) };
+    const ts = teams.filter(t => t.alliance === alliance);
+    return {
+      v: 1, // version
+      match: matchNumber,
+      alliance,
+      teams: ts.map(t => ({
+        n: t.number,
+        c: t.cycles,
+        a: { cl: t.auto.close?1:0, f: t.auto.far?1:0, sc: t.auto.scored, cls: t.auto.classified, nt: t.notes.auto },
+        tl: { nt: t.notes.teleop },
+        p: {
+          auto:   t.paths.auto.map(p => simplify(p).map(tf)),
+          teleop: t.paths.teleop.map(p => simplify(p).map(tf)),
+        },
+      })),
+    };
   }
 
   function mergeFromPayload(payload) {
-    const fromField = p => p.map(ftf);
+    const isCompact = payload.v === 1;
     payload.teams.forEach((src, slot) => {
       const t = teams.find(t => t.alliance === payload.alliance && t.slot === slot);
       if (!t) return;
-      teams = teams.map(x => x.id !== t.id ? x : {
-        ...x,
-        number: src.number ?? x.number,
-        cycles: src.cycles ?? x.cycles,
-        notes:  src.notes  ?? x.notes,
-        auto:   src.auto   ?? x.auto,
-        paths: {
-          auto:   (src.paths?.auto   ?? []).map(fromField),
-          teleop: (src.paths?.teleop ?? []).map(fromField),
-        },
-      });
+      const fromField = p => p.map(ftf);
+      if (isCompact) {
+        teams = teams.map(x => x.id !== t.id ? x : {
+          ...x,
+          number:  src.n  ?? x.number,
+          cycles:  src.c  ?? x.cycles,
+          notes:   { auto: src.a?.nt ?? x.notes.auto, teleop: src.tl?.nt ?? x.notes.teleop },
+          auto:    { close: !!src.a?.cl, far: !!src.a?.f, scored: src.a?.sc ?? 0, classified: src.a?.cls ?? 0 },
+          paths:   { auto: (src.p?.auto ?? []).map(fromField), teleop: (src.p?.teleop ?? []).map(fromField) },
+        });
+      } else {
+        // legacy format
+        teams = teams.map(x => x.id !== t.id ? x : {
+          ...x,
+          number: src.number ?? x.number,
+          cycles: src.cycles ?? x.cycles,
+          notes:  src.notes  ?? x.notes,
+          auto:   src.auto   ?? x.auto,
+          paths:  { auto: (src.paths?.auto ?? []).map(fromField), teleop: (src.paths?.teleop ?? []).map(fromField) },
+        });
+      }
     });
     if (payload.match) matchNumber = payload.match;
   }
@@ -223,11 +248,17 @@
     scanError = ''; scanSuccess = '';
     showScanQR = true;
     try {
-      scanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
-      await new Promise(r => setTimeout(r, 50));
+      scanStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }
+      });
+      // wait for the video element to mount in the DOM
+      await new Promise(r => setTimeout(r, 100));
       if (!videoEl) { scanError = 'Camera element not ready'; return; }
       videoEl.srcObject = scanStream;
+      videoEl.setAttribute('playsinline', '');
       await videoEl.play();
+      // wait for video to actually have dimensions
+      await new Promise(r => { videoEl.onloadedmetadata = r; if (videoEl.readyState >= 2) r(); });
       scanLoop();
     } catch(e) {
       scanError = `Camera error: ${e.message}`;
@@ -235,29 +266,53 @@
   }
 
   function scanLoop() {
-    if (!videoEl || !scanCanvas || videoEl.readyState < 2) {
-      scanRAF = requestAnimationFrame(scanLoop); return;
-    }
+    if (!videoEl || !scanCanvas) { scanRAF = requestAnimationFrame(scanLoop); return; }
+    if (videoEl.readyState < 2 || videoEl.paused) { scanRAF = requestAnimationFrame(scanLoop); return; }
     const W = videoEl.videoWidth, H = videoEl.videoHeight;
     if (!W || !H) { scanRAF = requestAnimationFrame(scanLoop); return; }
     scanCanvas.width = W; scanCanvas.height = H;
-    const ctx = scanCanvas.getContext('2d');
+    const ctx = scanCanvas.getContext('2d', { willReadFrequently: true });
     ctx.drawImage(videoEl, 0, 0, W, H);
     const imgData = ctx.getImageData(0, 0, W, H);
-    const result = jsQR(imgData.data, W, H);
-    if (result) {
+    const result = jsQR(imgData.data, W, H, { inversionAttempts: 'dontInvert' });
+
+    if (result?.data) {
+      // Draw highlight box around detected QR
+      const loc = result.location;
+      ctx.strokeStyle = '#2ed573';
+      ctx.lineWidth = Math.max(3, W / 100);
+      ctx.beginPath();
+      ctx.moveTo(loc.topLeftCorner.x, loc.topLeftCorner.y);
+      ctx.lineTo(loc.topRightCorner.x, loc.topRightCorner.y);
+      ctx.lineTo(loc.bottomRightCorner.x, loc.bottomRightCorner.y);
+      ctx.lineTo(loc.bottomLeftCorner.x, loc.bottomLeftCorner.y);
+      ctx.closePath();
+      ctx.stroke();
+
       try {
         const raw = decodeURIComponent(escape(atob(result.data)));
         const payload = JSON.parse(raw);
-        mergeFromPayload(payload);
-        scanSuccess = `Merged ${payload.alliance} alliance data!`;
-        stopScan();
-        setTimeout(() => { scanSuccess = ''; showScanQR = false; }, 1800);
-        return;
+        if (payload.alliance && payload.teams) {
+          mergeFromPayload(payload);
+          scanSuccess = `✓ Merged ${payload.alliance} alliance!`;
+          stopScan();
+          setTimeout(() => { scanSuccess = ''; showScanQR = false; }, 2000);
+          return;
+        }
       } catch {
         // not our QR, keep scanning
       }
+    } else {
+      // Draw guide box
+      const size = Math.min(W, H) * 0.6;
+      const x = (W - size) / 2, y = (H - size) / 2;
+      ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([size * 0.1, size * 0.05]);
+      ctx.strokeRect(x, y, size, size);
+      ctx.setLineDash([]);
     }
+
     scanRAF = requestAnimationFrame(scanLoop);
   }
 
@@ -377,7 +432,7 @@
 
 <div class="app">
   <header>
-    <span class="logo">FTC Scout</span>
+    <span class="logo">FTC Match Planner | @1Mon 13302</span>
     {#if matchNumber}<span class="match-chip">Match {matchNumber}</span>{/if}
     <div class="phase-btns">
       <button class:active={phase === 'auto'}   onclick={() => phase = 'auto'}>Auto</button>
@@ -606,7 +661,7 @@
         <p class="qr-note">Point camera at the alliance QR code.</p>
       {/if}
       <!-- svelte-ignore a11y_media_has_caption -->
-      <video bind:this={videoEl} class="scan-video" playsinline></video>
+      <video bind:this={videoEl} class="scan-video-hidden" playsinline></video>
       <canvas bind:this={scanCanvas} class="scan-canvas"></canvas>
       <div class="modal-actions">
         <button class="btn-cancel" onclick={closeScan}>Cancel</button>
@@ -728,8 +783,8 @@
   .qr-error { color: #e74c3c; font-size: 12px; text-align: center; padding: 16px; line-height: 1.6; }
   .qr-size { font-size: 10px; color: #444; }
 
-  .scan-video { width: 300px; height: 300px; object-fit: cover; border-radius: 6px; background: #000; }
-  .scan-canvas { display: none; }
+  .scan-video-hidden { display: none; }
+  .scan-canvas { width: 300px; height: 300px; object-fit: cover; border-radius: 6px; background: #000; display: block; }
 
   @media (max-width: 580px) {
     main { flex-direction: column; }
