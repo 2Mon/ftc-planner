@@ -51,6 +51,22 @@
   function setTeam(id, patch) {
     teams = teams.map(t => t.id === id ? { ...t, ...patch } : t);
   }
+  function clearAll() {
+    if (!confirm('Clear all match data? This cannot be undone.')) return;
+    teams = [
+      { id: 0, number: '', color: '#ef5350', alliance: 'red',  slot: 0, visible: true, paths: { auto: [], teleop: [] }, notes: { auto: '', teleop: '' }, auto: { close: false, far: false, scored: 0, classified: 0 }, cycles: 0 },
+      { id: 1, number: '', color: '#ff7043', alliance: 'red',  slot: 1, visible: true, paths: { auto: [], teleop: [] }, notes: { auto: '', teleop: '' }, auto: { close: false, far: false, scored: 0, classified: 0 }, cycles: 0 },
+      { id: 2, number: '', color: '#42a5f5', alliance: 'blue', slot: 0, visible: true, paths: { auto: [], teleop: [] }, notes: { auto: '', teleop: '' }, auto: { close: false, far: false, scored: 0, classified: 0 }, cycles: 0 },
+      { id: 3, number: '', color: '#7e57c2', alliance: 'blue', slot: 1, visible: true, paths: { auto: [], teleop: [] }, notes: { auto: '', teleop: '' }, auto: { close: false, far: false, scored: 0, classified: 0 }, cycles: 0 },
+    ];
+    matchNumber = '';
+    score = { red: '', blue: '', notes: '' };
+    undoStack = [];
+    redoStack = [];
+    phase = 'auto';
+    activeId = 0;
+  }
+
   function clearActive() {
     const t = teams.find(t => t.id === activeId);
     if (!t) return;
@@ -156,6 +172,145 @@
     a.href = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }));
     a.download = `match-${matchNumber || 'scouting'}.json`;
     a.click();
+  }
+
+  // ── Match history ─────────────────────────────────────────────────────────────
+  let showHistory   = $state(false);
+  let history       = $state([]);
+  let saveFlash     = $state(false);
+
+  function loadHistory() {
+    try { history = JSON.parse(localStorage.getItem('ftc-history') ?? '[]'); } catch { history = []; }
+  }
+
+  function saveMatch() {
+    const serTeam = t => ({
+      team: t.number, cycles: t.cycles,
+      auto:   { ...t.auto, notes: t.notes.auto,   paths: t.paths.auto.map(p => simplify(p).map(tf)) },
+      teleop: { notes: t.notes.teleop, paths: t.paths.teleop.map(p => simplify(p).map(tf)) },
+    });
+    const entry = {
+      id: Date.now(),
+      savedAt: new Date().toLocaleString(),
+      match: matchNumber,
+      score,
+      alliances: { red: redTeams.map(serTeam), blue: blueTeams.map(serTeam) },
+    };
+    const next = [entry, ...history].slice(0, 50); // keep last 50
+    localStorage.setItem('ftc-history', JSON.stringify(next));
+    history = next;
+    saveFlash = true;
+    setTimeout(() => saveFlash = false, 1500);
+  }
+
+  function loadMatch(entry) {
+    const fromField = p => p.map(ftf);
+    const loadTeam = (src, alliance, slot) => {
+      const existing = teams.find(t => t.alliance === alliance && t.slot === slot);
+      return { ...existing,
+        number: src.team ?? '',
+        cycles: src.cycles ?? 0,
+        notes:  { auto: src.auto?.notes ?? '', teleop: src.teleop?.notes ?? '' },
+        auto:   { close: src.auto?.close ?? false, far: src.auto?.far ?? false,
+                  scored: src.auto?.scored ?? 0, classified: src.auto?.classified ?? 0 },
+        paths:  { auto: (src.auto?.paths ?? []).map(fromField), teleop: (src.teleop?.paths ?? []).map(fromField) },
+      };
+    };
+    const ra = entry.alliances.red ?? [], ba = entry.alliances.blue ?? [];
+    teams = [
+      loadTeam(ra[0] ?? {}, 'red',  0), loadTeam(ra[1] ?? {}, 'red',  1),
+      loadTeam(ba[0] ?? {}, 'blue', 0), loadTeam(ba[1] ?? {}, 'blue', 1),
+    ];
+    matchNumber = entry.match ?? '';
+    score = entry.score ?? { red: '', blue: '', notes: '' };
+    undoStack = []; redoStack = [];
+    showHistory = false;
+  }
+
+  function deleteHistoryEntry(id) {
+    const next = history.filter(e => e.id !== id);
+    localStorage.setItem('ftc-history', JSON.stringify(next));
+    history = next;
+  }
+  // ── Print / PDF ───────────────────────────────────────────────────────────────
+  function printView() {
+    const fieldDataURL = canvas?.toDataURL('image/png') ?? '';
+    const ts = new Date().toLocaleString();
+    const teamBlock = (t, cls, titleColor) => `
+      <div class="team-block ${cls}">
+        <div class="team-title" style="color:${titleColor}">${t.number || '—'}</div>
+        <div class="pills">
+          ${t.auto.close ? '<span class="pill">Close Auto</span>' : ''}
+          ${t.auto.far   ? '<span class="pill">Far Auto</span>'   : ''}
+          <span class="pill">Scored: ${t.auto.scored}</span>
+          <span class="pill">Classified: ${t.auto.classified}</span>
+          <span class="pill">Cycles: ${t.cycles}</span>
+        </div>
+        ${t.notes.auto   ? `<div class="note-section"><b>Auto:</b> ${t.notes.auto}</div>` : ''}
+        ${t.notes.teleop ? `<div class="note-section"><b>Teleop:</b> ${t.notes.teleop}</div>` : ''}
+      </div>`;
+    const winner = score.red !== '' && score.blue !== ''
+      ? (+score.red > +score.blue ? '🔴 Red wins' : +score.blue > +score.red ? '🔵 Blue wins' : '🤝 Tie') : '';
+    const w = window.open('', '_blank');
+    w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8">
+    <title>Match ${matchNumber || '—'} — FTC Match Planner</title>
+    <style>
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body { font-family: system-ui, sans-serif; color: #111; background: #fff; padding: 20px; font-size: 13px; }
+      h1 { font-size: 18px; margin-bottom: 2px; }
+      .meta { font-size: 11px; color: #888; margin-bottom: 16px; }
+      .layout { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+      .field-img { width: 100%; border: 1px solid #ddd; border-radius: 4px; display: block; }
+      .alliances { display: flex; flex-direction: column; gap: 12px; }
+      .alliance-group { display: flex; flex-direction: column; gap: 8px; }
+      .alliance-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .1em; padding-bottom: 4px; border-bottom: 2px solid; margin-bottom: 4px; }
+      .alliance-label.red  { color: #c0392b; border-color: #c0392b; }
+      .alliance-label.blue { color: #2980b9; border-color: #2980b9; }
+      .team-block { padding: 8px; border-radius: 4px; }
+      .red-block  { background: #fff5f5; border: 1px solid #fcc; }
+      .blue-block { background: #f5f8ff; border: 1px solid #c8d8f8; }
+      .team-title { font-size: 15px; font-weight: 700; margin-bottom: 5px; }
+      .pills { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 5px; }
+      .pill { font-size: 10px; background: #eee; border-radius: 3px; padding: 2px 6px; }
+      .note-section { font-size: 11px; color: #444; margin-top: 3px; line-height: 1.5; }
+      .score-row { margin-top: 16px; display: flex; align-items: center; gap: 12px; border-top: 1px solid #eee; padding-top: 12px; flex-wrap: wrap; }
+      .score-box { text-align: center; }
+      .score-box .num { font-size: 28px; font-weight: 700; }
+      .score-box .lbl { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
+      .red-score .num { color: #c0392b; } .blue-score .num { color: #2980b9; }
+      .score-vs { font-size: 18px; color: #ccc; }
+      .winner-label { font-size: 13px; font-weight: 600; }
+      .score-notes { font-size: 11px; color: #666; margin-top: 8px; font-style: italic; }
+      .footer { margin-top: 16px; font-size: 10px; color: #bbb; text-align: right; }
+      @media print { body { padding: 10px; } }
+    </style></head><body>
+    <h1>Match ${matchNumber || '—'}</h1>
+    <div class="meta">FTC Match Planner · @1Mon 13302 · ${ts}</div>
+    <div class="layout">
+      ${fieldDataURL ? `<img class="field-img" src="${fieldDataURL}" />` : '<div style="background:#eee;aspect-ratio:1;border-radius:4px"></div>'}
+      <div class="alliances">
+        <div class="alliance-group">
+          <div class="alliance-label red">Red Alliance</div>
+          ${redTeams.map(t => teamBlock(t, 'red-block', '#c0392b')).join('')}
+        </div>
+        <div class="alliance-group">
+          <div class="alliance-label blue">Blue Alliance</div>
+          ${blueTeams.map(t => teamBlock(t, 'blue-block', '#2980b9')).join('')}
+        </div>
+      </div>
+    </div>
+    ${score.red !== '' || score.blue !== '' ? `
+    <div class="score-row">
+      <div class="score-box red-score"><div class="num">${score.red||'—'}</div><div class="lbl">Red</div></div>
+      <div class="score-vs">–</div>
+      <div class="score-box blue-score"><div class="num">${score.blue||'—'}</div><div class="lbl">Blue</div></div>
+      ${winner ? `<div class="winner-label">${winner} · ${Math.abs((+score.red||0)-(+score.blue||0))} pt margin</div>` : ''}
+    </div>
+    ${score.notes ? `<div class="score-notes">${score.notes}</div>` : ''}` : ''}
+    <div class="footer">Printed from FTC Match Planner</div>
+    <script>window.onload = () => window.print();<\/script>
+    </body></html>`);
+    w.document.close();
   }
 
   // ── Overlays ──────────────────────────────────────────────────────────────────
@@ -412,6 +567,7 @@
   $effect(() => { teams; phase; activeId; redraw(); });
 
   onMount(() => {
+    loadHistory();
     FIELD = new Image();
     FIELD.src = `${base}/field.png`;
     FIELD.onload = () => redraw();
@@ -434,7 +590,8 @@
 
 <div class="app">
   <header>
-    <span class="logo">FTC Match Planer | @1Mon 13302</span>
+    <span class="logo">FTC Match Planner</span>
+    <span class="credit">@1Mon 13302</span>
     {#if matchNumber}<span class="match-chip">Match {matchNumber}</span>{/if}
     <div class="phase-btns">
       <button class:active={phase === 'auto'}   onclick={() => phase = 'auto'}>Auto</button>
@@ -442,8 +599,13 @@
     </div>
     <div class="hdr-actions">
       <button onclick={openSetup}>⊞ Setup</button>
+      <button class="save-btn" class:flash={saveFlash} onclick={saveMatch}>
+        {saveFlash ? '✓ Saved' : '💾 Save'}
+      </button>
+      <button onclick={() => { loadHistory(); showHistory = true; }}>📋 History</button>
       <button onclick={() => { importText = ''; importError = ''; showImport = true; }}>↑ Import</button>
       <button onclick={exportFullJSON}>↓ Export</button>
+      <button class="print-btn" onclick={printView}>🖨 Print</button>
       <button class="scan-btn" onclick={startScan}>📷 Scan QR</button>
     </div>
   </header>
@@ -454,6 +616,7 @@
         <button class:active={tool === 'draw'}  onclick={() => tool = 'draw'}>✏ Draw</button>
         <button class:active={tool === 'erase'} onclick={() => tool = 'erase'}>⌫ Erase</button>
         <button class="danger" onclick={clearActive}>Clear</button>
+        <button class="danger" onclick={clearAll}>Clear All</button>
         <button onclick={undo} disabled={!undoStack.length} title="Ctrl+Z">↩ Undo</button>
         <button onclick={redo} disabled={!redoStack.length} title="Ctrl+Y">↪ Redo</button>
         {#if active}
@@ -672,6 +835,58 @@
   </div>
 {/if}
 
+{#if showHistory}
+  <div class="overlay" onclick={() => showHistory = false} role="dialog" aria-modal="true">
+    <div class="modal history-modal" onclick={e => e.stopPropagation()} onkeydown={() => {}}>
+      <div class="modal-title">📋 Match History</div>
+      {#if history.length === 0}
+        <p class="history-empty">No saved matches yet. Hit 💾 Save to record the current match.</p>
+      {:else}
+        <div class="history-list">
+          {#each history as entry (entry.id)}
+            <div class="history-entry">
+              <div class="history-meta">
+                <span class="history-match">
+                  {entry.match ? `Match ${entry.match}` : 'Unsaved match'}
+                </span>
+                <span class="history-time">{entry.savedAt}</span>
+              </div>
+              <div class="history-teams">
+                <span class="h-red">
+                  {entry.alliances.red.map(t => t.team || '—').join(' & ')}
+                </span>
+                <span class="h-vs">vs</span>
+                <span class="h-blue">
+                  {entry.alliances.blue.map(t => t.team || '—').join(' & ')}
+                </span>
+              </div>
+              {#if entry.score?.red !== '' || entry.score?.blue !== ''}
+                <div class="history-score">
+                  <span class="h-red">{entry.score.red || '?'}</span>
+                  <span class="h-dash">–</span>
+                  <span class="h-blue">{entry.score.blue || '?'}</span>
+                  {#if entry.score.red !== '' && entry.score.blue !== ''}
+                    <span class="h-winner">
+                      {+entry.score.red > +entry.score.blue ? '🔴' : +entry.score.blue > +entry.score.red ? '🔵' : '🤝'}
+                    </span>
+                  {/if}
+                </div>
+              {/if}
+              <div class="history-actions">
+                <button class="btn-apply" onclick={() => loadMatch(entry)}>Load</button>
+                <button class="btn-cancel" onclick={() => deleteHistoryEntry(entry.id)}>Delete</button>
+              </div>
+            </div>
+          {/each}
+        </div>
+      {/if}
+      <div class="modal-actions">
+        <button class="btn-cancel" onclick={() => showHistory = false}>Close</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
 <style>
   :global(*, *::before, *::after) { box-sizing: border-box; margin: 0; padding: 0; }
   :global(body) { font-family: system-ui, sans-serif; background: #111; color: #eee; overflow: hidden; }
@@ -680,6 +895,7 @@
 
   header { display: flex; align-items: center; gap: 8px; padding: 7px 12px; background: #1a1a1a; border-bottom: 1px solid #2e2e2e; flex-shrink: 0; flex-wrap: wrap; }
   .logo { font-weight: 700; font-size: 15px; }
+  .credit { font-size: 11px; color: #444; }
   .match-chip { font-size: 12px; color: #888; background: #252525; padding: 3px 8px; border-radius: 3px; }
   .phase-btns { display: flex; gap: 4px; margin-left: auto; }
   .hdr-actions { display: flex; gap: 4px; }
@@ -691,6 +907,9 @@
   .hdr-actions button:hover { background: #333; color: #eee; }
   .scan-btn { color: #ffd700 !important; border-color: #554400 !important; }
   .scan-btn:hover { background: #332200 !important; }
+  .save-btn { color: #2ed573 !important; border-color: #1a4a30 !important; }
+  .save-btn:hover { background: #1a3a25 !important; }
+  .save-btn.flash { background: #1a4a30 !important; color: #2ed573 !important; }
 
   main { display: flex; flex: 1; overflow: hidden; min-height: 0; }
 
@@ -789,7 +1008,31 @@
   .scan-canvas { width: 300px; height: 300px; object-fit: cover; border-radius: 6px; background: #000; display: block; }
 
   @media (max-width: 580px) {
-    main { flex-direction: column; }
-    aside { width: 100%; border-left: none; border-top: 1px solid #2a2a2a; max-height: 44dvh; }
+    main { flex-direction: column; overflow-y: auto; }
+    .field-col { flex: none; padding: 8px; }
+    .canvas-wrap { width: min(100%, calc(100dvh - 44dvh - 80px)); max-width: 100%; margin: 0 auto; }
+    aside { width: 100%; border-left: none; border-top: 1px solid #2a2a2a; max-height: none; overflow-y: visible; }
+    .qr-modal { width: 100dvw; height: 100dvh; border-radius: 0; border: none; justify-content: center; max-height: 100dvh; }
+    .qr-frame { width: 85vw; height: 85vw; }
+    .scan-canvas { width: 90vw; height: 90vw; }
   }
+  .print-btn { color: #a29bfe !important; border-color: #3a3060 !important; }
+  .print-btn:hover { background: #2a2050 !important; }  .history-modal { width: 420px; max-width: 95vw; }
+  .history-empty { font-size: 13px; color: #555; text-align: center; padding: 12px 0; }
+  .history-list { display: flex; flex-direction: column; gap: 8px; max-height: 60dvh; overflow-y: auto; }
+  .history-entry { background: #141414; border: 1px solid #2a2a2a; border-radius: 6px; padding: 10px 12px; display: flex; flex-direction: column; gap: 5px; }
+  .history-meta { display: flex; justify-content: space-between; align-items: baseline; }
+  .history-match { font-size: 13px; font-weight: 700; color: #eee; }
+  .history-time { font-size: 10px; color: #444; }
+  .history-teams { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; }
+  .h-red { color: #ef5350; }
+  .h-blue { color: #42a5f5; }
+  .h-vs { font-size: 10px; color: #444; }
+  .h-dash { color: #555; }
+  .history-score { display: flex; align-items: center; gap: 5px; font-size: 14px; font-weight: 700; }
+  .h-winner { font-size: 13px; }
+  .history-actions { display: flex; gap: 6px; margin-top: 2px; }
+  .history-actions .btn-apply { padding: 4px 12px; font-size: 12px; }
+  .history-actions .btn-cancel { padding: 4px 10px; font-size: 12px; }
+
 </style>
