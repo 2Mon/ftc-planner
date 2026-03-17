@@ -321,6 +321,8 @@
     if (scanStream) { scanStream.getTracks().forEach(t => t.stop()); scanStream = null; }
   }
 
+  function closeScan() { stopScan(); showScanQR = false; scanError = ''; scanSuccess = ''; }
+
   async function downloadQR() {
     const res = await fetch(qrImageURL);
     const blob = await res.blob();
@@ -432,7 +434,7 @@
 
 <div class="app">
   <header>
-    <span class="logo">FTC Match Planner | @1Mon 13302</span>
+    <span class="logo">FTC Match Planer | @1Mon 13302</span>
     {#if matchNumber}<span class="match-chip">Match {matchNumber}</span>{/if}
     <div class="phase-btns">
       <button class:active={phase === 'auto'}   onclick={() => phase = 'auto'}>Auto</button>
